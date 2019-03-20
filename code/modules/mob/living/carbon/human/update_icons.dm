@@ -23,31 +23,23 @@ core parts. The key difference is that when we generate overlays we do not gener
 versions. Instead, we generate both and store them in two fixed-length lists, both using the same list-index
 (The indexes are in update_icons.dm): Each list for humans is (at the time of writing) of length 19.
 This will hopefully be reduced as the system is refined.
-
 	var/overlays_lying[19]			//For the lying down stance
 	var/overlays_standing[19]		//For the standing stance
-
 When we call update_icons, the 'lying' variable is checked and then the appropriate list is assigned to our overlays!
 That in itself uses a tiny bit more memory (no more than all the ridiculous lists the game has already mind you).
-
 On the other-hand, it should be very CPU cheap in comparison to the old system.
 In the old system, we updated all our overlays every life() call, even if we were standing still inside a crate!
 or dead!. 25ish overlays, all generated from scratch every second for every xeno/human/monkey and then applied.
 More often than not update_clothing was being called a few times in addition to that! CPU was not the only issue,
 all those icons had to be sent to every client. So really the cost was extremely cumulative. To the point where
 update_clothing would frequently appear in the top 10 most CPU intensive procs during profiling.
-
 Another feature of this new system is that our lists are indexed. This means we can update specific overlays!
 So we only regenerate icons when we need them to be updated! This is the main saving for this system.
-
 In practice this means that:
 	everytime you fall over, we just switch between precompiled lists. Which is fast and cheap.
 	Everytime you do something minor like take a pen out of your pocket, we only update the in-hand overlay
 	etc...
-
-
 There are several things that need to be remembered:
-
 >	Whenever we do something that should cause an overlay to update (which doesn't use standard procs
 	( i.e. you do something like l_hand = /obj/item/something new(src) )
 	You will need to call the relevant update_inv_* proc:
@@ -67,12 +59,9 @@ There are several things that need to be remembered:
 		update_inv_back()
 		update_inv_handcuffed()
 		update_inv_wear_mask()
-
 	All of these are named after the variable they update from. They are defined at the mob/ level like
 	update_clothing was, so you won't cause undefined proc runtimes with usr.update_inv_wear_id() if the usr is a
 	slime etc. Instead, it'll just return without doing any work. So no harm in calling it for slimes and such.
-
-
 >	There are also these special cases:
 		update_mutations()	//handles updating your appearance for certain mutations.  e.g TK head-glows
 		UpdateDamageIcon()	//handles damage overlays for brute/burn damage //(will rename this when I geta round to it)
@@ -80,7 +69,6 @@ There are several things that need to be remembered:
 		update_hair()	//Handles updating your hair overlay (used to be update_face, but mouth and
 																			...eyes were merged into update_body)
 		update_targeted() // Updates the target overlay when someone points a gun at you
-
 >	All of these procs update our overlays_lying and overlays_standing, and then call update_icons() by default.
 	If you wish to update several overlays at once, you can set the argument to 0 to disable the update and call
 	it manually:
@@ -88,25 +76,20 @@ There are several things that need to be remembered:
 		update_inv_head(0)
 		update_inv_l_hand(0)
 		update_inv_r_hand()		//<---calls update_icons()
-
 	or equivillantly:
 		update_inv_head(0)
 		update_inv_l_hand(0)
 		update_inv_r_hand(0)
 		update_icons()
-
 >	If you need to update all overlays you can use regenerate_icons(). it works exactly like update_clothing used to.
-
 >	I reimplimented an old unused variable which was in the code called (coincidentally) var/update_icon
 	It can be used as another method of triggering regenerate_icons(). It's basically a flag that when set to non-zero
 	will call regenerate_icons() at the next life() call and then reset itself to 0.
 	The idea behind it is icons are regenerated only once, even if multiple events requested it.
-
 This system is confusing and is still a WIP. It's primary goal is speeding up the controls of the game whilst
 reducing processing costs. So please bear with me while I iron out the kinks. It will be worth it, I promise.
 If I can eventually free var/lying stuff from the life() process altogether, stuns/death/status stuff
 will become less affected by lag-spikes and will be instantaneous! :3
-
 If you have any questions/constructive-comments/bugs-to-report/or have a massivly devestated butt...
 Please contact me on #coderbus IRC. ~Carn x
 */
@@ -137,11 +120,10 @@ Please contact me on #coderbus IRC. ~Carn x
 #define HANDCUFF_LAYER			23
 #define L_HAND_LAYER			24
 #define R_HAND_LAYER			25
-#define WING_LAYER				26		//VOREStation edit. Simply move this up a number if things are added.
-#define TAIL_LAYER_ALT			27		//VOREStation edit. Simply move this up a number if things are added.
-#define FIRE_LAYER				28		//If you're on fire
-#define TARGETED_LAYER			29		//BS12: Layer for the target overlay from weapon targeting system
-#define TOTAL_LAYERS			29
+#define FIRE_LAYER				26		//If you're on fire
+#define TARGETED_LAYER			27		//BS12: Layer for the target overlay from weapon targeting system
+#define TOTAL_LAYERS			27
+#define WING_LAYER				28
 //////////////////////////////////
 
 /mob/living/carbon/human
@@ -154,40 +136,45 @@ Please contact me on #coderbus IRC. ~Carn x
 	update_hud()		//TODO: remove the need for this
 	overlays.Cut()
 
-	var/list/visible_overlays = overlays_standing
-
+	var/list/overlays_to_apply = list()
 	if (icon_update)
-		if(is_cloaked())
 
+		var/list/visible_overlays
+		if(is_cloaked())
 			icon = 'icons/mob/human.dmi'
 			icon_state = "blank"
-
 			visible_overlays = list(visible_overlays[R_HAND_LAYER], visible_overlays[L_HAND_LAYER])
-
 		else
 			icon = stand_icon
 			icon_state = null
+			visible_overlays = overlays_standing
 
 		var/matrix/M = matrix()
 		if(lying && (species.prone_overlay_offset[1] || species.prone_overlay_offset[2]))
 			M.Translate(species.prone_overlay_offset[1], species.prone_overlay_offset[2])
-		for(var/entry in visible_overlays)
+
+		for(var/i = 1 to LAZYLEN(visible_overlays))
+			var/entry = visible_overlays[i]
 			if(istype(entry, /image))
 				var/image/overlay = entry
-				overlay.transform = M
-				overlays += overlay
+				if(i != DAMAGE_LAYER)
+					overlay.transform = M
+				overlays_to_apply += overlay
 			else if(istype(entry, /list))
 				for(var/image/overlay in entry)
-					overlay.transform = M
-					overlays += overlay
+					if(i != DAMAGE_LAYER)
+						overlay.transform = M
+					overlays_to_apply += overlay
 
 		var/obj/item/organ/external/head/head = organs_by_name[BP_HEAD]
 		if(istype(head) && !head.is_stump())
 			var/image/I = head.get_eye_overlay()
-			if(I) overlays |= I
+			if(I) overlays_to_apply += I
 
 	if(auras)
-		overlays |= auras
+		overlays_to_apply += auras
+
+	overlays = overlays_to_apply
 
 	var/matrix/M = matrix()
 	if(lying)
@@ -197,7 +184,7 @@ Please contact me on #coderbus IRC. ~Carn x
 	else
 		M.Scale(size_multiplier)
 		M.Translate(0, 16*(size_multiplier-1))
-	transform = M
+//	animate(src, transform = M, time = ANIM_LYING_TIME)           Anim_lying_time undefined var
 
 var/global/list/damage_icon_parts = list()
 
@@ -232,12 +219,12 @@ var/global/list/damage_icon_parts = list()
 		O.update_icon()
 		if(O.damage_state == "00") continue
 		var/icon/DI
-		var/use_colour = ((O.robotic >= ORGAN_ROBOT) ? SYNTH_BLOOD_COLOUR : O.species.get_blood_colour(src))
-		var/cache_index = "[O.damage_state]/[O.icon_name]/[use_colour]/[species.get_bodytype(src)]"
+//		var/use_colour = (BP_IS_ROBOTIC(O) ? SYNTH_BLOOD_COLOUR : O.species.get_blood_colour(src))
+		var/cache_index = "[O.damage_state]/[O.icon_name]/[species.get_blood_colour(src)]/[species.get_bodytype(src)]"
 		if(damage_icon_parts[cache_index] == null)
 			DI = new /icon(species.get_damage_overlays(src), O.damage_state)			// the damage icon for whole human
 			DI.Blend(new /icon(species.get_damage_mask(src), O.icon_name), ICON_MULTIPLY)	// mask with this organ's pixels
-			DI.Blend(use_colour, ICON_MULTIPLY)
+			DI.Blend(species.get_blood_colour(src), ICON_MULTIPLY)
 			damage_icon_parts[cache_index] = DI
 		else
 			DI = damage_icon_parts[cache_index]
@@ -248,6 +235,12 @@ var/global/list/damage_icon_parts = list()
 
 	if(update_icons)
 		queue_icon_update()
+
+
+
+
+
+
 
 //BASE MOB SPRITE
 /mob/living/carbon/human/proc/update_body(var/update_icons=1)
@@ -303,7 +296,7 @@ var/global/list/damage_icon_parts = list()
 				icon_key += "#000000"
 			for(var/M in part.markings)
 				icon_key += "[M][part.markings[M]["color"]]"
-		if(part.robotic >= ORGAN_ROBOT)
+//		if(BP_IS_ROBOTIC(part))                BP_IS_ROBOTIC Undefined Proc
 			icon_key += "2[part.model ? "-[part.model]": ""]"
 		else if(part.status & ORGAN_DEAD)
 			icon_key += "3"
@@ -753,57 +746,6 @@ var/global/list/damage_icon_parts = list()
 	if(update_icons)
 		queue_icon_update()
 
-/mob/living/carbon/human/proc/animate_wing_reset(var/update_icons=1)
-	if(stat != DEAD)
-		set_wing_state("[species.get_wing(src)]_idle[rand(0,9)]")
-	else
-		set_wing_state("[species.get_wing(src)]_static")
-		toggle_wing_vr(FALSE)
-
-	if(update_icons)
-		queue_icon_update()
-
-
-/mob/living/carbon/human/proc/update_wing_showing(var/update_icons=1)
-	overlays_standing[WING_LAYER] = null
-
-	var/species_wing = species.get_wing(src)
-
-	if(species_wing && !(wear_suit && wear_suit.flags_inv & HIDETAIL))
-		var/icon/wing_s = get_wing_icon()
-		overlays_standing[WING_LAYER] = image(wing_s, icon_state = "[species_wing]_s")
-		animate_wing_reset(0)
-
-	if(update_icons)
-		queue_icon_update()
-
-/mob/living/carbon/human/proc/get_wing_icon()
-	var/icon_key = "[species.get_race_key(src)][r_skin][g_skin][b_skin][r_hair][g_hair][b_hair]"
-	var/icon/wing_icon = wing_icon_cache[icon_key]
-	if(!wing_icon)
-		//generate a new one
-		var/species_wing_anim = species.get_wing_animation(src)
-		if(!species_wing_anim) species_wing_anim = 'icons/effects/species.dmi'
-		wing_icon = new/icon(species_wing_anim)
-//		wing_icon.Blend(rgb(r_skin, g_skin, b_skin), species.wing_blend) TODO: Disabled wing coloring for now - Jon
-		// The following will not work with animated wings.
-		var/use_species_wing = species.get_wing_hair(src)
-		if(use_species_wing)
-			var/icon/hair_icon = icon('icons/effects/species.dmi', "[species.get_wing(src)]_[use_species_wing]")
-			hair_icon.Blend(rgb(r_hair, g_hair, b_hair), ICON_ADD)
-			wing_icon.Blend(hair_icon, ICON_OVERLAY)
-		wing_icon_cache[icon_key] = wing_icon
-
-	return wing_icon
-
-
-/mob/living/carbon/human/proc/set_wing_state(var/t_state)
-	var/image/wing_overlay = overlays_standing[WING_LAYER]
-
-	if(wing_overlay && species.get_wing_animation(src))
-		wing_overlay.icon_state = t_state
-		return wing_overlay
-	return null
 
 //Adds a collar overlay above the helmet layer if the suit has one
 //	Suit needs an identically named sprite in icons/mob/collar.dmi
@@ -839,6 +781,19 @@ var/global/list/damage_icon_parts = list()
 		queue_icon_update()
 
 
+/mob/living/carbon/human/proc/update_wing_showing(var/update_icons=1)
+	overlays_standing[WING_LAYER] = null
+	var/image/vr_wing_image = get_wing_image()
+	if(vr_wing_image)
+		vr_wing_image.layer = BODY_LAYER+WING_LAYER
+
+	overlays_standing[WING_LAYER] = vr_wing_image
+
+	if(update_icons)
+		queue_icon_update()
+
+
+
 //Human Overlays Indexes/////////
 #undef MUTATIONS_LAYER
 #undef DAMAGE_LAYER
@@ -862,6 +817,7 @@ var/global/list/damage_icon_parts = list()
 #undef LEGCUFF_LAYER
 #undef L_HAND_LAYER
 #undef R_HAND_LAYER
+#undef WING_LAYER
 #undef TARGETED_LAYER
 #undef FIRE_LAYER
 #undef TOTAL_LAYERS
